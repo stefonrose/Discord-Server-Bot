@@ -127,6 +127,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+bot-env/
 
 # Spyder project settings
 .spyderproject
@@ -184,3 +185,5 @@ pip-selfcheck.json
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+sin*.json

@@ -4,11 +4,11 @@ import logging
 from typing import List
 from urllib import response
 from disnake.ext import commands
-import resources.config as config
+import config
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     bot = commands.InteractionBot(
         test_guilds=[int(config.SINFUL_SERVER_ID), int(config.MY_SERVER_ID)],
         intents=disnake.Intents.all(),
