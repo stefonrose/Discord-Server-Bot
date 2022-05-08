@@ -187,3 +187,5 @@ pip-selfcheck.json
 *.vsix
 
 sin*.json
+
+assets/

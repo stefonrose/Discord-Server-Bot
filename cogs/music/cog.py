@@ -4,7 +4,9 @@ import wavelink
 import firebase_admin
 import config
 from typing import List
+from datetime import datetime, timezone
 from disnake.ext import commands
+from wavelink.ext import spotify
 from . import errors, checks, utils, views
 from firebase_admin import credentials, db
 
@@ -31,6 +33,10 @@ class MusicCog(commands.Cog, name="Music"):
             host=self.hosts[index],
             port=self.ports[index],
             password=self.passw[index],
+            spotify_client=spotify.SpotifyClient(
+                client_id=config.SPOTIFY_CLIENT_ID,
+                client_secret=config.SPOTIFY_CLIENT_SECRET,
+            ),
         )
 
     @commands.Cog.listener()
@@ -45,6 +51,9 @@ class MusicCog(commands.Cog, name="Music"):
         await player.stop()
         if not player.queue.is_empty:
             next_track = player.queue.get()
+            print(
+                f"TITLE: {next_track.title}| ID:{next_track.id} | IDENTIFIER:{next_track.identifier}"
+            )
             await player.play(next_track)
         else:
             time = 0
@@ -53,7 +62,7 @@ class MusicCog(commands.Cog, name="Music"):
                 await asyncio.sleep(1)
                 time += 1
                 if player.is_playing() and not player.is_paused():
-                    time = 0
+                    break
                 if time == 60:
                     await player.disconnect()
                 if not player.is_connected():
@@ -74,34 +83,24 @@ class MusicCog(commands.Cog, name="Music"):
 
     @checks.check_voice()
     @commands.slash_command()
-    async def play(
-        self,
-        interaction: disnake.ApplicationCommandInteraction,
-        search: str,
-    ):
-        """Plays the song that matches the given search query."""
+    async def stop(self, interaction: disnake.ApplicationCommandInteraction):
+        """Stop music playback and clear queue"""
         voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        track = await wavelink.YouTubeTrack.search(query=search, return_first=True)
-        print(f"Title: {track.title}/n Thumbnail: {track.title}")
-
-        if voice.is_playing() or (voice.is_paused() and not voice.queue.is_empty):
-            print("Some songs ahead.")
-            voice.queue.put(track)
-            await interaction.response.send_message("Song queued.")
-        else:
-            print("No songs yet.")
-            await voice.play(track)
-            await interaction.response.send_message(
-                embed=views.NowPlayingEmbed(track, interaction.author),
-            )
+        voice.queue.clear()
+        await voice.stop()
+        await interaction.response.send_message(
+            "Stopping music playback", ephemeral=True
+        )
 
     @checks.check_voice()
     @commands.slash_command()
-    async def stop(self, interaction: disnake.ApplicationCommandInteraction):
-        """Stops the song that is currently playing"""
+    async def skip(self, interaction: disnake.ApplicationCommandInteraction):
+        """Skips to the next track in the queue."""
         voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        voice.stop()
-        await interaction.response.send_message("Stopping current song.")
+        await voice.stop()
+        await interaction.response.send_message(
+            "Skipping to the next track!", ephemeral=True
+        )
 
     @checks.check_voice()
     @commands.slash_command()
@@ -112,15 +111,96 @@ class MusicCog(commands.Cog, name="Music"):
     ):
         """Adjust the volume of the bot"""
         voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        current_volume = int(voice.volume)
+        volumeRef = db.reference("settings/volume")
+        current_volume = volumeRef.get()
         if not level:
             await interaction.response.send_message(
                 f"My current volume is {current_volume}"
             )
         else:
             await voice.set_volume(level)
+            settingsRef = db.reference("settings")
+            settingsRef.update({"volume": level})
             await interaction.response.send_message(
                 f"Volume changed from {current_volume} to {level}"
+            )
+
+    @checks.check_voice()
+    @commands.slash_command()
+    async def play(
+        self,
+        interaction: disnake.ApplicationCommandInteraction,
+        search: str,
+    ):
+        """Plays the song that matches the given search query."""
+        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
+        track = await wavelink.YouTubeTrack.search(query=search, return_first=True)
+        track.set_requester(interaction.author)
+        track.set_requested(datetime.now())
+
+        if voice.is_playing() or (voice.is_paused() and not voice.queue.is_empty):
+            voice.queue.put(track)
+            await interaction.response.send_message("Song queued.", ephemeral=True)
+        else:
+            await voice.play(track)
+            await interaction.response.send_message(
+                embed=views.NowPlayingEmbed(track=track, bot=interaction.me),
+            )
+
+    @checks.check_voice()
+    @commands.slash_command()
+    async def spotify(
+        self, interaction: disnake.ApplicationCommandInteraction, url: str
+    ):
+        """Play music using a Spotify playlist or album URL."""
+        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
+        decoded = spotify.decode_url(url=url)
+        if not decoded:
+            interaction.response.send_message(
+                "Your search query must be a link to a Spotify song, album or playlist."
+            )
+            return
+        elif decoded["type"] is spotify.SpotifySearchType.track:
+            track = await spotify.SpotifyTrack.search(
+                query=decoded["id"], type=decoded["type"]
+            )
+            track.set_requester(interaction.author)
+            track.set_requested(datetime.now())
+        elif decoded["type"] is spotify.SpotifySearchType.album:
+            await interaction.response.defer(ephemeral=True)
+            tracks = await spotify.SpotifyTrack.search(
+                query=decoded["id"], type=decoded["type"]
+            )
+            for track in tracks:
+                track.set_requester(interaction.author)
+                track.set_requested(datetime.now())
+        elif decoded["type"] is spotify.SpotifySearchType.playlist:
+            await interaction.response.defer(ephemeral=True)
+            tracks = await spotify.SpotifyTrack.search(
+                query=decoded["id"], type=decoded["type"]
+            )
+            for track in tracks:
+                track.set_requester(interaction.author)
+                track.set_requested(datetime.now())
+
+        if voice.is_playing() or (voice.is_paused() and not voice.queue.is_empty):
+            try:
+                voice.queue.put(track)
+                await interaction.edit_original_message("Song queued.")
+            except:
+                voice.queue.extend(tracks)
+                await interaction.edit_original_message("Songs added to the queue.")
+
+        else:
+            try:
+                voice.play(track)
+            except:
+                voice.play(tracks[0])
+                track = tracks.remove(0)
+                voice.queue.extend(tracks)
+            await voice.play(track)
+            await interaction.edit_original_message(
+                embed=views.NowPlayingEmbed(track=track, bot=None),
             )
 
     @join.error
@@ -137,6 +217,24 @@ class MusicCog(commands.Cog, name="Music"):
         if isinstance(error, errors.DifferentVoiceChannel):
             await interaction.response.send_message(
                 "I'm currently playing music in another channel.", ephemeral=True
+            )
+
+    @checks.is_creator()
+    @commands.slash_command()
+    async def now_playing(
+        self, interaction: disnake.ApplicationCommandInteraction, default: bool = False
+    ):
+        await interaction.response.send_message(
+            embed=views.NowPlayingEmbed(track=None, bot=interaction.me)
+        )
+
+    @now_playing.error
+    async def creator_error(
+        self, interaction: disnake.ApplicationCommandInteraction, error
+    ):
+        if isinstance(error, errors.NotMyCreator):
+            await interaction.response.send_message(
+                "You are not my creator", ephemeral=True
             )
 
     async def fetchVoice(self, interaction: disnake.ApplicationCommandInteraction):

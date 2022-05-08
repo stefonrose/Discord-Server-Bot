@@ -1,11 +1,13 @@
 import re
 
 
-def categorize(self, query):
-    pass
+def sanitize(title: str):
+    first_scrub = re.sub("[\(\[](.*?)[\)\]]", "", title).strip()
+    second_scrub = re.sub(" {2,}", " ", first_scrub)
+    return second_scrub
 
 
-def isURL(self, query):
+def isURL(query):
     regex = (
         "((http|https)://)(www.)?"
         + "[a-zA-Z0-9@:%._\\+~#?&//=]"

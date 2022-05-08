@@ -1,10 +1,7 @@
-import os
-import disnake
-import logging
 from typing import List
 from urllib import response
 from disnake.ext import commands
-import config
+import os, config, disnake, logging
 
 
 def main():

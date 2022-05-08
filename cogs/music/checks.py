@@ -23,3 +23,14 @@ def check_voice():
         return True
 
     return commands.check(predicate)
+
+
+def is_creator():
+    def predicate(interaction: disnake.ApplicationCommandInteraction):
+        if interaction.author.id != 329109742742011904:
+            print("Not my creator")
+            raise errors.NotMyCreator()
+
+        return True
+
+    return commands.check(predicate)
