@@ -12,3 +12,7 @@ class DifferentVoiceChannel(CheckFailure):
 
 class InvalidURL(CheckFailure):
     pass
+
+
+class NotMyCreator(CheckFailure):
+    pass
