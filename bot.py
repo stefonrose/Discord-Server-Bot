@@ -5,7 +5,7 @@ import os, config, disnake, logging
 
 
 def main():
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     bot = commands.InteractionBot(
         test_guilds=[int(config.SINFUL_SERVER_ID), int(config.MY_SERVER_ID)],
         intents=disnake.Intents.all(),

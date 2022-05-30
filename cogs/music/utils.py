@@ -1,4 +1,13 @@
-import re
+import re, wavelink, disnake
+from firebase_admin import db
+from datetime import datetime
+
+
+def saveRequestInfo(
+    *, dbReference: str, requester: disnake.Member, requested: datetime
+):
+    songRef = db.reference(dbReference)
+    songRef.update({"requester": requester.id, "requested": requested})
 
 
 def sanitize(title: str):
