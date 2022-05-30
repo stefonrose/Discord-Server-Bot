@@ -118,6 +118,8 @@ class MusicCog(commands.Cog, name="Music"):
                 f"My current volume is {current_volume}"
             )
         else:
+            if level > 100:
+                level = 100 #Hard set volume to 100 instead of allowing for 1000!!!
             await voice.set_volume(level)
             settingsRef = db.reference("settings")
             settingsRef.update({"volume": level})
