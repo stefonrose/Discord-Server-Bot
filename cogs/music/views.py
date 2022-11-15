@@ -54,10 +54,10 @@ def TrackEnqueuedEmbed(track: wavelink.YouTubeTrack) -> disnake.Embed:
     embed = disnake.Embed(title=title, url=track.uri)
     # embed.set_thumbnail(track.thumbnail)
     embed.set_image(assets["spacer"])
-    embed.set_footer(
-        text=f"Requested by {track.requester.display_name}",
-        icon_url=track.requester.display_avatar.url,
-    )
+    # embed.set_footer(
+    #     text=f"Requested by {track.requester.display_name}",
+    #     icon_url=track.requester.display_avatar.url,
+    # )
     return embed
 
 
@@ -69,13 +69,11 @@ def QueueItem(
     thumbnail: str = None,
     track: wavelink.YouTubeTrack,
 ) -> disnake.Embed:
-    embed = disnake.Embed(title=f"{count}. {track.title}", timestamp=track.requested)
+    embed = disnake.Embed(title=f"{count}. {track.title}", timestamp=requested)
     if count == 1:
-        embed.set_thumbnail(track.thumbnail)
+        embed.set_thumbnail(thumbnail)
     embed.set_image(assets["spacer"])
-    embed.set_footer(
-        text=track.requester.display_name, icon_url=track.requester.display_avatar.url
-    )
+    embed.set_footer(text=requester.display_name, icon_url=requester.display_avatar.url)
     return embed
 
 

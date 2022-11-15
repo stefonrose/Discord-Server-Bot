@@ -12,5 +12,7 @@ MY_SERVER_ID = os.getenv("MY_SERVER")
 SPOTIFY_CLIENT_ID = os.getenv("CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
+BOT_ACK = os.getenv("BOT_ACK")
+
 with open("sinful-server-bot-firebase.json") as fb:
     FIREBASE_CONFIG = json.load(fb)

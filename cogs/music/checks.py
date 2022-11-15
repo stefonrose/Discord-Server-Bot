@@ -1,5 +1,5 @@
 import disnake, wavelink, logging
-from . import errors
+from ..error import errors
 from disnake.ext import commands
 
 
@@ -22,9 +22,9 @@ def check_voice():
                     )
                     raise errors.DifferentVoiceChannel()
         except errors.DifferentVoiceChannel:
-            raise errors.DifferentVoiceChannel
+            raise errors.DifferentVoiceChannel()
         except Exception as e:
-            logging.warning(
+            logging.debug(
                 f"{interaction.author.display_name}(ID:{interaction.author.id}) triggered an exception in check_voice: {e}"
             )
 

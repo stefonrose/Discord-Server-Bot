@@ -1,11 +1,12 @@
-from typing import List
-from pyparsing import empty
-from disnake.ext import commands
+from enum import Enum
+from . import checks, views
+from firebase_admin import db
+from datetime import datetime
+from typing import List, Union
 from wavelink.ext import spotify
-from datetime import datetime, timezone
-from . import errors, checks, utils, views
-from firebase_admin import credentials, db
-import config, disnake, asyncio, wavelink, firebase_admin
+from disnake.ext import commands, tasks
+from urllib.parse import parse_qs, urlparse
+import re, config, disnake, asyncio, logging, wavelink, validators
 
 
 class MusicCog(commands.Cog, name="Music"):
@@ -14,15 +15,8 @@ class MusicCog(commands.Cog, name="Music"):
         self.hosts = ["lava.link", "lavalink.darrenofficial.com"]
         self.ports = [80, 80]
         self.passw = ["anything as a password", "anything as a password"]
-        self.firebase_cred = credentials.Certificate(config.FIREBASE_CONFIG)
-        self.firebase_app = firebase_admin.initialize_app(
-            self.firebase_cred,
-            {
-                "databaseURL": "https://sinful-server-bot-default-rtdb.firebaseio.com/",
-                "databaseAuthVariableOverride": {"uid": "discord_bot"},
-            },
-        )
         bot.loop.create_task(self.connect_nodes(1))
+        self.idle_bot.start()
 
     async def connect_nodes(self, index: int):
         """Connect to Lavalink node"""
@@ -39,19 +33,36 @@ class MusicCog(commands.Cog, name="Music"):
             ),
         )
 
+    @tasks.loop(minutes=5)
+    async def idle_bot(self):
+        players: List[wavelink.Player] = self.bot.voice_clients
+        if len(players) > 0:
+            for player in players:
+                if (
+                    not player.is_playing()
+                    and not player.is_paused()
+                    and player.queue.is_empty
+                ):
+                    await player.disconnect()
+
+    @idle_bot.before_loop
+    async def before_idle_bot(self):
+        await self.bot.wait_until_ready()
+
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, node: wavelink.Node):
         """Node connection event."""
-        print(f"Node: <{node.identifier}> is ready!")
+        self.node = node
+        logging.info(f"Node: <{node.identifier}> is ready!")
 
     @commands.Cog.listener()
     async def on_wavelink_track_start(
         self, player: wavelink.Player, track: wavelink.Track
     ):
         """Edit now-playing & queue when song starts playing"""
-        await self.editNowPlaying(guild=player.guild, track=track)
+        await self.edit_now_playing(guild=player.guild, track=track)
         await asyncio.sleep(5)
-        await self.editQueue(player=player, guild=player.guild)
+        await self.edit_queue(player=player, guild=player.guild)
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(
@@ -65,23 +76,13 @@ class MusicCog(commands.Cog, name="Music"):
             next_track = player.queue.get()
             await player.play(next_track)
         else:
-            await self.editNowPlaying(guild=player.guild)
-            time = 0
-            while True:
-                print(time)
-                await asyncio.sleep(1)
-                time += 1
-                if player.is_playing() and not player.is_paused():
-                    break
-                if time == 60:
-                    await player.disconnect()
-                if not player.is_connected():
-                    break
+            await self.edit_now_playing(guild=player.guild)
+            await asyncio.sleep(5)
+            await self.edit_queue(player=player, guild=player.guild)
 
     @commands.Cog.listener()
     async def on_wavelink_websocket_closed(self, player: wavelink.Player, reason, code):
         """Stops the player and disconnects if the socket connection is lost"""
-        print(reason, code)
         await player.stop()
         await player.disconnect()
 
@@ -92,239 +93,229 @@ class MusicCog(commands.Cog, name="Music"):
         before: disnake.VoiceState,
         after: disnake.VoiceState,
     ):
+        player = await self.check_voice(member.guild)
         if member.id == member.guild.me.id:
             if before.channel is not None:
-                await self.editNowPlaying(guild=member.guild)
+                await self.edit_now_playing(guild=member.guild)
                 await asyncio.sleep(5)
-                await self.editQueue(guild=member.guild, empty=True)
+                await self.edit_queue(guild=member.guild, empty=True)
+        else:
+            if after.channel is None and player is not None:
+                if len(before.channel.members) == 1:
+                    await player.disconnect()
 
     @checks.check_voice()
     @commands.slash_command()
     async def join(self, interaction: disnake.ApplicationCommandInteraction):
-        """Request the bot join your current voice channel."""
-        voice = await self.fetchVoice(interaction=interaction)
-        print(interaction.author.display_avatar.url)
-        response = "Joining the channel now!"
+        """Have the bot join your current voice channel."""
+        voice = await self.join_voice(interaction=interaction)
+        response = f"Joining the channel now! {config.BOT_ACK}"
         await interaction.response.send_message(content=response, ephemeral=True)
 
     @checks.check_voice()
     @commands.slash_command()
     async def leave(self, interaction: disnake.ApplicationCommandInteraction):
         """Have the bot leave your current voice channel."""
-        voice: wavelink.Player = disnake.utils.get(
-            self.bot.voice_clients, guild=interaction.guild
-        )
+        voice = await self.check_voice(guild=interaction.guild)
         if voice is not None:
             response = "Leaving the voice channel now."
-            voice.disconnect()
+            await voice.disconnect()
         else:
             response = "I'm not connected to your voice channel right now."
         await interaction.response.send_message(content=response, ephemeral=True)
 
     @checks.check_voice()
+    @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.slash_command()
     async def pause(self, interaction: disnake.ApplicationCommandInteraction):
         """Pause and resume music playback. Keeps queue!"""
-        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
+        voice: wavelink.Player = await self.join_voice(interaction=interaction)
         if voice.is_paused():
             await voice.resume()
-            await self.editNowPlaying(guild=interaction.guild, track=voice.track)
+            await self.edit_now_playing(guild=interaction.guild, track=voice.track)
             response = "Music playback resumed."
         elif voice.is_playing():
             await voice.pause()
-            await self.editNowPlaying(
+            await self.edit_now_playing(
                 guild=interaction.guild, track=voice.track, pause=True
             )
             response = "Music playback paused."
         else:
             response = "No music is playing or paused."
-        await interaction.response.send_message(content=response, ephemeral=True)
+        await interaction.response.send_message(content=response)
 
     @checks.check_voice()
     @commands.slash_command()
     async def stop(self, interaction: disnake.ApplicationCommandInteraction):
         """Stop music playback. Clears queue!"""
-        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        voice.queue.clear()
-        await voice.stop()
-        response = "Stopping music playback"
-        await interaction.response.send_message(content=response, ephemeral=True)
+        voice: wavelink.Player = await self.join_voice(interaction=interaction)
+        if not voice.is_playing() and not voice.is_paused() and voice.queue.is_empty:
+            response = "There is no music playing or queued!"
+        else:
+            voice.queue.clear()
+            await voice.stop()
+            response = "Stopping music playback and clearing queue!"
+        await interaction.response.send_message(content=response)
 
     @checks.check_voice()
+    @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.slash_command()
     async def skip(self, interaction: disnake.ApplicationCommandInteraction):
-        """Skips to the next track in the queue."""
-        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        await voice.stop()
-        await interaction.response.send_message(
-            "Skipping to the next track!", ephemeral=True
-        )
+        """Stops the currently song and plays the next song in the queue (If it exists)."""
+        voice: wavelink.Player = await self.join_voice(interaction=interaction)
+        if not voice.is_playing() and not voice.is_paused() and voice.queue.is_empty:
+            response = "There is no music playing or queued!"
+        else:
+            await voice.stop()
+            response = "Skipping to the next track!"
+        await interaction.response.send_message(content=response)
 
-    @checks.check_voice()
+    @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.slash_command()
     async def volume(
         self,
         interaction: disnake.ApplicationCommandInteraction,
         level: commands.Range[0, 100] = None,
     ):
-        """Display or adjust the volume of the bot."""
-        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
+        """
+        Display or adjust the volume of the bot.
 
+        Parameters
+        ----------
+        level: :class:`int`
+            The level to change the volume to (0-100)
+        """
+        voice = await self.check_voice(guild=interaction.guild)
         volumeRef = db.reference(f"{interaction.guild_id}/properties/volume")
         current_volume = volumeRef.get()
         if not level:
-            await interaction.response.send_message(
-                f"My current volume is {current_volume}"
-            )
+            response = f"My current volume is {current_volume}. {config.BOT_ACK}"
         else:
-            if level > 100:
-                level = 100 #Hard set volume to 100 instead of allowing for 1000!!!
-            await voice.set_volume(level)
+            try:
+                await voice.set_volume(level)
+            except:
+                logging.debug("Supressed exception in '/volume'")
             propertiesRef = db.reference(f"{interaction.guild_id}/properties")
             propertiesRef.update({"volume": level})
-            await interaction.response.send_message(
-                f"Volume changed from {current_volume} to {level}"
+            response = (
+                f"Volume changed from {current_volume} to {level}. {config.BOT_ACK}"
             )
+        await interaction.response.send_message(content=response)
 
     @checks.check_voice()
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    @commands.max_concurrency(1, commands.BucketType.guild, wait=True)
     @commands.slash_command()
     async def play(
         self,
         interaction: disnake.ApplicationCommandInteraction,
         search: str,
     ):
-        """Plays the song that matches the given search query."""
-        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        track = await wavelink.YouTubeTrack.search(query=search, return_first=True)
-        track.set_requester(interaction.author)
-        track.set_requested(datetime.now())
-        dbReference = f"{voice.guild.id}/tracks/{track.identifier}"
-        self.saveRequestInfo(
-            dbReference=dbReference,
-            track=track,
-        )
+        """
+        Plays the song that matches the given search query.
 
-        if voice.is_playing() or (voice.is_paused() and not voice.queue.is_empty):
-            voice.queue.put(track)
-            await self.editQueue(player=voice, guild=voice.guild)
-            await interaction.response.send_message(
-                embed=views.TrackEnqueuedEmbed(track=track), ephemeral=True
-            )
+        Parameters
+        ----------
+        search: :class:`str`
+            A song title, youtube or spotify link
+        """
+        voice: wavelink.Player = await self.join_voice(interaction=interaction)
+        await interaction.response.defer(ephemeral=True)
+        if validators.url(search):
+            linkInfo = self.link_type(search)
+            match linkInfo["type"]:
+                case Music.youtube:
+                    match linkInfo["data"]:
+                        case Music.youtubeVideo:
+                            track = await wavelink.YouTubeTrack.search(
+                                query=search, return_first=True
+                            )
+                            self.save_track(inter=interaction, track=track, voice=voice)
+                            await voice.queue.put_wait(track)
+                            await interaction.edit_original_message(
+                                content=f"{config.BOT_ACK}",
+                                embed=views.TrackEnqueuedEmbed(track=track),
+                            )
+                            track = None
+                        case Music.youtubePlaylist:
+                            playlist = await self.node.get_playlist(
+                                wavelink.YouTubePlaylist, search
+                            )
+                            for track in playlist.tracks:
+                                self.save_track(
+                                    inter=interaction, track=track, voice=voice
+                                )
+                                await voice.queue.put_wait(track)
+                            message = f"{len(playlist.tracks)} songs added to the queue. {config.BOT_ACK}"
+                            await interaction.edit_original_message(content=message)
+                            track = None
+
+                case Music.spotify:
+                    spotifyInfo = linkInfo["data"]
+                    match spotifyInfo["type"]:
+                        case spotify.SpotifySearchType.track:
+                            track = await spotify.SpotifyTrack.search(
+                                query=spotifyInfo["id"],
+                                type=spotifyInfo["type"],
+                                return_first=True,
+                            )
+                            self.save_track(inter=interaction, track=track, voice=voice)
+                            await voice.queue.put_wait(track)
+                            await interaction.edit_original_message(
+                                content=f"{config.BOT_ACK}",
+                                embed=views.TrackEnqueuedEmbed(track=track),
+                            )
+                            track = None
+                        case spotify.SpotifySearchType.album:
+                            tracks = await spotify.SpotifyTrack.search(
+                                query=spotifyInfo["id"], type=spotifyInfo["type"]
+                            )
+                            for track in tracks:
+                                self.save_track(
+                                    inter=interaction, track=track, voice=voice
+                                )
+                                await voice.queue.put_wait(track)
+                            message = f"{len(tracks)} songs added to the queue. {config.BOT_ACK}"
+                            await interaction.edit_original_message(content=message)
+                            track = None
+
+                        case spotify.SpotifySearchType.playlist:
+                            tracks = await spotify.SpotifyTrack.search(
+                                query=spotifyInfo["id"], type=spotifyInfo["type"]
+                            )
+                            for track in tracks:
+                                self.save_track(
+                                    inter=interaction, track=track, voice=voice
+                                )
+                                await voice.queue.put_wait(track)
+                            message = f"{len(tracks)} songs added to the queue. {config.BOT_ACK}"
+                            await interaction.edit_original_message(content=message)
+                            track = None
+                case None:
+                    message = "Only YouTube and Spotify links are supported."
+                    await interaction.edit_original_message(content=message)
         else:
+            track = await wavelink.YouTubeTrack.search(query=search, return_first=True)
+            self.save_track(inter=interaction, track=track, voice=voice)
+            await voice.queue.put_wait(track)
+            await interaction.edit_original_message(
+                content=f"{config.BOT_ACK}",
+                embed=views.TrackEnqueuedEmbed(track=track),
+            )
+            track = None
+
+        if not voice.is_playing() and not voice.is_paused():
+            track = await voice.queue.get_wait()
             await voice.play(track)
-            await interaction.response.send_message(
-                embed=views.TrackEnqueuedEmbed(track=track), ephemeral=True
-            )
-
-    @checks.check_voice()
-    @commands.slash_command()
-    async def spotify(
-        self, interaction: disnake.ApplicationCommandInteraction, url: str
-    ):
-        """Play music using a Spotify playlist or album URL."""
-        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        decoded = spotify.decode_url(url=url)
-        if not decoded:
-            await interaction.response.send_message(
-                "Your search query must be a link to a Spotify song, album or playlist."
-            )
-            return
-        elif decoded["type"] is spotify.SpotifySearchType.track:
-            print("isTrack")
-            track = await spotify.SpotifyTrack.search(
-                query=decoded["id"], type=decoded["type"], return_first=True
-            )
-            track.set_requester(interaction.author)
-            track.set_requested(datetime.now())
-            dbReference = f"{voice.guild.id}/tracks/{track.identifier}"
-            self.saveRequestInfo(
-                dbReference=dbReference,
-                track=track,
-            )
-        elif decoded["type"] is spotify.SpotifySearchType.album:
-            print("isAlbum")
-            await interaction.response.defer(ephemeral=True)
-            tracks = await spotify.SpotifyTrack.search(
-                query=decoded["id"], type=decoded["type"]
-            )
-            for track in tracks:
-                track.set_requester(interaction.author)
-                track.set_requested(datetime.now())
-                dbReference = f"{voice.guild.id}/tracks/{track.identifier}"
-                self.saveRequestInfo(
-                    dbReference=dbReference,
-                    track=track,
-                )
-            track = None
-
-        elif decoded["type"] is spotify.SpotifySearchType.playlist:
-            print("isPlaylist")
-            await interaction.response.defer(ephemeral=True)
-            tracks = await spotify.SpotifyTrack.search(
-                query=decoded["id"], type=decoded["type"]
-            )
-            for track in tracks:
-                track.set_requester(interaction.author)
-                track.set_requested(datetime.now())
-                dbReference = f"{voice.guild.id}/tracks/{track.identifier}"
-                self.saveRequestInfo(
-                    dbReference=dbReference,
-                    track=track,
-                )
-            track = None
-
-        if voice.is_playing() or (voice.is_paused() and not voice.queue.is_empty):
-            if track is not None:
-                voice.queue.put(track)
-                await interaction.edit_original_message(
-                    embed=views.TrackEnqueuedEmbed(track=track),
-                )
-            elif tracks is not None:
-                voice.queue.extend(tracks)
-                message = f"{len(tracks)} songs added to the queue."
-                await interaction.edit_original_message(content=message)
-            await self.editQueue(player=voice, guild=voice.guild)
-
-        else:
-            if track is not None:
-                print(track)
-                await voice.play(track)
-                await interaction.edit_original_message(
-                    embed=views.TrackEnqueuedEmbed(track=track),
-                )
-            elif tracks is not None:
-                track = tracks.pop(0)
-                voice.queue.extend(tracks)
-                await voice.play(track)
-                message = f"{len(tracks)+1} songs added to the queue."
-                await interaction.edit_original_message(content=message)
-
-    @join.error
-    @leave.error
-    @play.error
-    @pause.error
-    @stop.error
-    @skip.error
-    @volume.error
-    @spotify.error
-    async def voice_error(
-        self, interaction: disnake.ApplicationCommandInteraction, error
-    ):
-        if isinstance(error, errors.NoVoiceConnection):
-            await interaction.response.send_message(
-                "You have to be in a voice channel to use that.", ephemeral=True
-            )
-        if isinstance(error, errors.DifferentVoiceChannel):
-            await interaction.response.send_message(
-                "I'm currently playing music in another channel.", ephemeral=True
-            )
+        if not voice.is_playing() and voice.is_paused():
+            await voice.resume()
 
     @checks.is_creator()
     @commands.slash_command()
     async def now_playing(
         self, interaction: disnake.ApplicationCommandInteraction, default: bool = False
     ):
-        """Displays new now playing message. Reequires permissions."""
+        """Displays new now playing message. Requires permissions."""
         np_embed = views.NowPlayingEmbed(track=None, bot=interaction.me)
         await interaction.response.send_message(embed=np_embed)
         message: disnake.InteractionMessage = await interaction.original_message()
@@ -340,10 +331,12 @@ class MusicCog(commands.Cog, name="Music"):
     async def show_queue(
         self, interaction: disnake.ApplicationCommandInteraction, default: bool = False
     ):
-        """Displays new queue message. Reequires permissions."""
-        voice: wavelink.Player = await self.fetchVoice(interaction=interaction)
-        embeds = await self.populateEmbeds(player=voice, bot=interaction.me)
-        await interaction.response.send_message(content="", embeds=embeds)
+        """Displays new queue message. Requires permissions."""
+        # voice: wavelink.Player = await self.join_voice(interaction=interaction)
+        embeds = await self.populate_embeds(player=None, bot=interaction.me, empty=True)
+        await interaction.response.send_message(
+            content="No songs in queue.", embeds=embeds
+        )
         message: disnake.InteractionMessage = await interaction.original_message()
         channel: disnake.TextChannel = message.channel
         if default:
@@ -352,24 +345,11 @@ class MusicCog(commands.Cog, name="Music"):
                 {"queue": {"message_id": message.id, "channel_id": channel.id}}
             )
 
-    @now_playing.error
-    async def creator_error(
-        self, interaction: disnake.ApplicationCommandInteraction, error
-    ):
-        if isinstance(error, errors.NotMyCreator):
-            await interaction.response.send_message(
-                "You are not my creator", ephemeral=True
-            )
+    ### Helper functions
 
-    async def fetchVoice(self, interaction: disnake.ApplicationCommandInteraction):
-        voice: wavelink.Player = disnake.utils.get(
-            self.bot.voice_clients, guild=interaction.guild
-        )
-        if (
-            not voice
-            # or interaction.author.voice.channel != interaction.me.voice.channel
-        ):
-            print("Connecting to user voice channel...")
+    async def join_voice(self, interaction: disnake.ApplicationCommandInteraction):
+        voice = await self.check_voice(guild=interaction.guild)
+        if not voice:
             voice = await interaction.author.voice.channel.connect(cls=wavelink.Player)
             await voice.guild.change_voice_state(channel=voice.channel, self_deaf=True)
         ref = db.reference(f"{interaction.guild_id}/properties/volume")
@@ -377,17 +357,11 @@ class MusicCog(commands.Cog, name="Music"):
         await voice.set_volume(current_volume)
         return voice
 
-    def saveRequestInfo(self, *, dbReference: str, track: wavelink.YouTubeTrack):
-        songRef = db.reference(dbReference)
-        songRef.update(
-            {
-                "requester": track.requester.id,
-                "requested": track.requested.timestamp(),
-                "thumbnail": track.thumbnail,
-            }
-        )
+    async def check_voice(self, guild: disnake.Guild) -> Union[wavelink.Player, None]:
+        voice: wavelink.Player = disnake.utils.get(self.bot.voice_clients, guild=guild)
+        return voice
 
-    async def populateEmbeds(
+    async def populate_embeds(
         self,
         *,
         player: wavelink.Player = None,
@@ -397,8 +371,6 @@ class MusicCog(commands.Cog, name="Music"):
         embeds = []
 
         if empty:
-            # for i in range(1, 11):
-            #    embeds.append(views.EmptyQueueItem(count=1, bot=bot))
             pass
         else:
             songs_count = min(player.queue.count, 10)
@@ -428,14 +400,11 @@ class MusicCog(commands.Cog, name="Music"):
                         track=track,
                     )
                 )
-            # for i in range(empty_count):
-            #     embed_count += 1
-            #     embeds.append(views.EmptyQueueItem(count=embed_count, bot=bot))
 
         embeds.reverse()
         return embeds
 
-    async def editNowPlaying(
+    async def edit_now_playing(
         self, *, guild: disnake.Guild, track: wavelink.Track = None, pause: bool = False
     ):
         np_ch_id = db.reference(f"{guild.id}/properties/now_playing/channel_id").get()
@@ -461,7 +430,7 @@ class MusicCog(commands.Cog, name="Music"):
         else:
             await now_playing_message.edit(embed=views.NowPlayingEmbed(bot=guild.me))
 
-    async def editQueue(
+    async def edit_queue(
         self,
         *,
         guild: disnake.Guild = None,
@@ -475,13 +444,61 @@ class MusicCog(commands.Cog, name="Music"):
         if empty:
             if len(queue_message.embeds) == 0:
                 return
-            embeds = await self.populateEmbeds(bot=guild.me, empty=empty)
+            embeds = await self.populate_embeds(bot=guild.me, empty=empty)
             await queue_message.edit(content="No songs in queue.", embeds=embeds)
         else:
-            embeds = await self.populateEmbeds(player=player, bot=guild.me, empty=empty)
-            if queue_message.embeds == embeds:
+            embeds = await self.populate_embeds(
+                player=player, bot=guild.me, empty=empty
+            )
+            if embeds == queue_message.embeds:
+                return
+            if len(embeds) == 0:
+                await queue_message.edit(content="No songs in queue.", embeds=embeds)
                 return
             await queue_message.edit(content="", embeds=embeds)
+
+    def save_track(
+        self,
+        *,
+        inter: disnake.ApplicationCommandInteraction,
+        track: wavelink.YouTubeTrack,
+        voice: wavelink.Player,
+    ):
+        dbReference = f"{voice.guild.id}/tracks/{track.identifier}"
+        songRef = db.reference(dbReference)
+        songRef.update(
+            {
+                "requester": inter.author.id,
+                "requested": datetime.now().timestamp(),
+                "thumbnail": track.thumbnail,
+            }
+        )
+
+    def link_type(self, url: str):
+        youtubePattern = re.compile("you")
+        spotifyPattern = re.compile("spotify")
+
+        youtubeResult = youtubePattern.search(url)
+        spotifyResult = spotifyPattern.search(url)
+
+        if youtubeResult is not None:
+            ytQuery = parse_qs(urlparse(url).query, keep_blank_values=True)
+            if "v" in ytQuery:
+                return {"type": Music.youtube, "data": Music.youtubeVideo}
+            if "list" in ytQuery:
+                return {"type": Music.youtube, "data": Music.youtubePlaylist}
+        elif spotifyResult is not None:
+            spotifyInfo = spotify.decode_url(url=url)
+            return {"type": Music.spotify, "data": spotifyInfo}
+        else:
+            return {"type": None}
+
+
+class Music(Enum):
+    youtube = 1
+    spotify = 2
+    youtubeVideo = 3
+    youtubePlaylist = 4
 
 
 def setup(bot):

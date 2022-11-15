@@ -1,7 +1,7 @@
 from typing import List
-from urllib import response
 from disnake.ext import commands
-import os, config, disnake, logging
+from firebase_admin import credentials
+import os, config, disnake, logging, firebase_admin
 
 
 def main():
@@ -11,17 +11,36 @@ def main():
         intents=disnake.Intents.all(),
     )
 
+    bot.firebase_cred = credentials.Certificate(config.FIREBASE_CONFIG)
+    bot.firebase_app = firebase_admin.initialize_app(
+        bot.firebase_cred,
+        {
+            "databaseURL": "https://sinful-server-bot-default-rtdb.firebaseio.com/",
+            "databaseAuthVariableOverride": {"uid": "discord_bot"},
+        },
+    )
+
+    bot.customAttr = "Maple Syrup"
+
     @bot.event
     async def on_ready():
-        guilds: List[disnake.Guild] = bot.guilds
-        for guild in guilds:
-            # await guild.change_voice_state(None, self_deaf=True)
-            print(f"Bot is now connected to {guild.name}")
+        logging.info("Bot has established connection to server(s).")
 
     for folder in os.listdir("cogs"):
         if os.path.exists(os.path.join("cogs", folder, "cog.py")):
-            # print(f"cogs.{folder}.cog")
             bot.load_extension(f"cogs.{folder}.cog")
+
+    @bot.slash_command()
+    async def help(interaction: disnake.ApplicationCommandInteraction):
+        """Displays a list of all available commands."""
+        embed = disnake.Embed(
+            title="Slash Commands List",
+        )
+        for app_command in bot.slash_commands:
+            embed.add_field(
+                name=app_command.name, value=app_command.description, inline=False
+            )
+        await interaction.response.send_message(embed=embed)
 
     bot.run(config.BOT_TOKEN)
 
