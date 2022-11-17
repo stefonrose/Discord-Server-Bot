@@ -8,25 +8,21 @@ from disnake.ext import commands, tasks
 from urllib.parse import parse_qs, urlparse
 import re, config, disnake, asyncio, logging, wavelink, validators
 
-
 class MusicCog(commands.Cog, name="Music"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.hosts = ["lava.link", "lavalink.darrenofficial.com"]
-        self.ports = [80, 80]
-        self.passw = ["anything as a password", "anything as a password"]
-        bot.loop.create_task(self.connect_nodes(1))
+        bot.loop.create_task(self.connect_nodes())
         self.idle_bot.start()
 
-    async def connect_nodes(self, index: int):
+    async def connect_nodes(self):
         """Connect to Lavalink node"""
         await self.bot.wait_until_ready()
 
         await wavelink.NodePool.create_node(
             bot=self.bot,
-            host=self.hosts[index],
-            port=self.ports[index],
-            password=self.passw[index],
+            host="us1.lavalink.creavite.co",
+            port=20080,
+            password="auto.creavite.co",
             spotify_client=spotify.SpotifyClient(
                 client_id=config.SPOTIFY_CLIENT_ID,
                 client_secret=config.SPOTIFY_CLIENT_SECRET,

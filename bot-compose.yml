@@ -1,0 +1,20 @@
+version: '3.3'
+
+services:
+  lavalink:
+    network_mode: host
+    build:
+      context: ./lavalink
+      dockerfile: Dockerfile
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml
+    ports:
+      - "2333:2333"
+    restart: always
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - lavalink
