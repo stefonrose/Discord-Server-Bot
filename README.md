@@ -1,5 +1,4 @@
-### Discord Server Bot (a.k.a. Sinful Server Bot)
-
+### Discord Server Bot
 This is a bot I created for a discord server that my friends and I share. The initial goal of the bot is to play music when given a song title or link. Additional features will be added as needed and documented in this readme.
 
 #### Roadmap
